@@ -1,0 +1,144 @@
+name: Build Alpine Linux for Xiaomi 5 (gemini)
+
+on:
+  push:
+    branches:
+      - alpine
+    paths:
+      - '.github/workflows/build-alpine.yml'
+      - 'kernel-config/**'
+      - 'scripts/alpine-*'
+      - 'deviceinfo'
+      - 'boot/mkbootimg/**'
+  workflow_dispatch: {}
+
+env:
+  # 固定 Alpine 小版本，保证构建可复现；升级时只需改这里
+  ALPINE_VERSION: 3.22.1
+  # 内核版本 = linux/ 源码树版本，用于缓存键
+  KERNEL_VER: '6.3.1'
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CC: aarch64-linux-gnu-gcc
+  # 桌面会话（labwc = 最轻量的 Wayland 合成器）
+  SESSION: labwc
+  # rootfs 标称大小（MiB），首次开机由 growroot 服务在线扩容
+  ROOTFS_SIZE_MB: 2048
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show runner resources
+        run: |
+          echo "CPU : $(nproc) cores"
+          free -h
+          df -h / /mnt
+
+      - name: Install host build dependencies
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex pkg-config libncurses-dev \
+            libssl-dev libelf-dev gcc-aarch64-linux-gnu \
+            python3 ca-certificates curl git xz-utils zstd lz4 cpio rsync \
+            kmod file e2fsprogs dosfstools mtools util-linux \
+            android-sdk-libsparse-utils
+          sudo apt-get install -y --no-install-recommends \
+            qemu-user-static binfmt-support || true
+
+      - name: Cache kernel build objects
+        uses: actions/cache@v4
+        with:
+          # 缓存整个 linux 源码树（含 .o 增量对象），配置不变时命中后只需增量编译
+          path: linux
+          key: gemini-kernel-${{ env.KERNEL_VER }}-alpine-${{ hashFiles('kernel-config/6.3.1-gemini-Ubuntu.config') }}
+          restore-keys: |
+            gemini-kernel-${{ env.KERNEL_VER }}-alpine-
+
+      - name: Build kernel Image.gz + DTBs + modules
+        run: |
+          set -e
+          export ARCH CROSS_COMPILE CC
+          export KBUILD_BUILD_TIMESTAMP="Thu Jan 1 00:00:00 UTC 2026"
+          make -C linux -j"$(nproc)" \
+            Image.gz \
+            qcom/msm8996-xiaomi-gemini.dtb \
+            qcom/msm8996-xiaomi-gemini-lgd-td4322.dtb
+          make -C linux -j"$(nproc)" modules
+          # 把模块装进暂存目录，供 rootfs 步骤使用
+          make -C linux INSTALL_MOD_PATH="$PWD/staging-modules" -j"$(nproc)" modules_install
+
+      - name: Download Alpine minirootfs
+        run: |
+          set -e
+          BOOT_URL="https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/alpine-minirootfs-${ALPINE_VERSION}-aarch64.tar.gz"
+          mkdir -p boot-strap
+          curl -fSL "$BOOT_URL" -o boot-strap/minirootfs.tar.gz
+          sha256sum boot-strap/minirootfs.tar.gz
+
+      - name: Build Alpine rootfs (chroot with qemu-user-static)
+        run: |
+          set -e
+          sudo -E bash scripts/alpine-build-rootfs.sh "$ALPINE_VERSION" "$SESSION" "$ROOTFS_SIZE_MB"
+
+      - name: Pack boot images (jdi + lgd)
+        run: |
+          set -e
+          sudo -E bash scripts/alpine-pack-boot.sh "$ALPINE_VERSION" "$SESSION"
+
+      - name: Compress rootfs to sparse image
+        run: |
+          set -e
+          img2simg boot/rootfs-alpine.img boot/rootfs-alpine.simg
+          # 另存一份 raw 镜像压缩包，便于 PC 端直接挂载/处理
+          tar -cJf "rootfs-alpine-raw.tar.xz" -C boot/rootfs-alpine.img rootfs-alpine.img
+          ls -la boot/*.img boot/*.simg
+
+      - name: Organize artifacts
+        run: |
+          set -e
+          mkdir -p out
+          cp boot/boot-alpine-jdi.img out/
+          cp boot/boot-alpine-lgd.img out/
+          cp boot/rootfs-alpine.simg out/
+          mv rootfs-alpine-raw.tar.xz out/
+          KVER=$(make -C linux -s kernelversion 2>/dev/null || echo "${KERNEL_VER}")
+          {
+            echo "Target device : Xiaomi Mi 5 (gemini, msm8996)"
+            echo "OS            : Alpine Linux ${ALPINE_VERSION} (aarch64)"
+            echo "Kernel        : ${KVER}"
+            echo "Session       : ${SESSION} (Wayland)"
+            echo "Branch        : ${GITHUB_REF_NAME}"
+            echo "Commit        : ${GITHUB_SHA}"
+            echo "Build date    : $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+            echo "Screens       : boot-alpine-jdi.img (JDI), boot-alpine-lgd.img (LGD)"
+          } > out/BUILD-INFO.txt
+          ls -la out/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-gemini-${{ github.run_number }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Release (tag push only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/boot-alpine-jdi.img
+            out/boot-alpine-lgd.img
+            out/rootfs-alpine.simg
+            out/rootfs-alpine-raw.tar.xz
+            out/BUILD-INFO.txt
