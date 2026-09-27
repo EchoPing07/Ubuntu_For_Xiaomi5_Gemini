@@ -69,6 +69,9 @@ jobs:
           set -e
           export ARCH CROSS_COMPILE CC
           export KBUILD_BUILD_TIMESTAMP="Thu Jan 1 00:00:00 UTC 2026"
+          # 使用仓库内置的 gemini 内核配置 (缺失项取默认值)
+          cp kernel-config/6.3.1-gemini-Ubuntu.config linux/.config
+          make -C linux ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC olddefconfig
           make -C linux -j"$(nproc)" \
             Image.gz \
             qcom/msm8996-xiaomi-gemini.dtb \
@@ -100,7 +103,7 @@ jobs:
           set -e
           img2simg boot/rootfs-alpine.img boot/rootfs-alpine.simg
           # 另存一份 raw 镜像压缩包，便于 PC 端直接挂载/处理
-          tar -cJf "rootfs-alpine-raw.tar.xz" -C boot/rootfs-alpine.img rootfs-alpine.img
+          tar -cJf "rootfs-alpine-raw.tar.xz" -C boot rootfs-alpine.img
           ls -la boot/*.img boot/*.simg
 
       - name: Organize artifacts

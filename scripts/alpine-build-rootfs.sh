@@ -126,9 +126,7 @@ run_in_chroot rc-update add dbus default
 run_in_chroot rc-update add chronyd default
 run_in_chroot rc-update add sshd default
 run_in_chroot rc-update add iwd default
-run_in_chroot rc-update add seatd default 2>/dev/null || true
-run_in_chroot rc-update add bluetooth default 2>/dev/null || true
-run_in_chroot rc-update add tinydm default 2>/dev/null || true
+# seatd/tinydm/bluetooth 包在后续步骤安装, 此处先跳过 (幂等补齐)若无害
 
 run_in_chroot rc-update add mount-ro shutdown 2>/dev/null || true
 run_in_chroot rc-update add killprocs shutdown 2>/dev/null || true
@@ -184,6 +182,12 @@ AUTOLOGIN_UID=$DEFAULT_UID
 EOF
 run_in_chroot "tinydm-set-session -f -s /usr/share/wayland-sessions/labwc.desktop"
 run_in_chroot rc-update add tinydm default
+run_in_chroot rc-update add seatd default
+
+# labwc (libseat/seatd 后端) 需要 XDG_RUNTIME_DIR; tinydm autologin 会话
+# 由 pam_rundir 创建 /run/user/$UID, 此处预建目录以保险
+sudo mkdir -p "$MNT/var/lib/gemini"
+sudo chown "$DEFAULT_UID:$DEFAULT_UID" "$MNT/var/lib/gemini"
 
 log "写入 labwc 用户配置 (触摸友好, 键盘/启动器快捷键)"
 sudo mkdir -p "$MNT/home/$DEFAULT_USER/.config/labwc"
